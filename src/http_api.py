@@ -98,6 +98,16 @@ def make_handler(service: Service, static_dir: str):
                     actor, role = self._identity()
                     del actor
                     self._json(200, {"events": service.audit(role)})
+                elif path == "/api/booms/deployments":
+                    actor, role = self._identity()
+                    del actor
+                    query = parse_qs(urlparse(self.path).query)
+                    status = query.get("status", [None])[0]
+                    self._json(200, {"deployments": service.list_boom_deployments(role, status)})
+                elif path == "/api/booms/summary":
+                    actor, role = self._identity()
+                    del actor
+                    self._json(200, service.boom_summary(role))
                 else:
                     self._json(404, {"error": "not_found"})
             except Exception as exc:
@@ -119,6 +129,11 @@ def make_handler(service: Service, static_dir: str):
                     expected = body.get("expected_version")
                     self._json(200, service.transition(
                         item_id, target, expected, actor, role))
+                elif path == "/api/booms/deployments":
+                    self._json(201, service.deploy_boom(body, actor, role))
+                elif path.startswith("/api/booms/deployments/") and path.endswith("/recover"):
+                    deployment_id = int(path.split("/")[4])
+                    self._json(200, service.recover_boom(deployment_id, body, actor, role))
                 else:
                     self._json(404, {"error": "not_found"})
             except Exception as exc:

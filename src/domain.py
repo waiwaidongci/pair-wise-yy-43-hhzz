@@ -1,5 +1,6 @@
 from __future__ import annotations
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 class ErrorKind:
     VALIDATION="validation"; NOT_FOUND="not_found"; FORBIDDEN="forbidden"; CONFLICT="conflict"
@@ -36,3 +37,14 @@ def require_number(value,field,minimum=0.0):
     return number
 def ensure_role(role,allowed):
     if role not in allowed: raise PermissionDenied("当前角色无权执行该操作")
+def require_coordinate(value,field):
+    if isinstance(value,bool): raise ValidationError(f"{field}必须是数字")
+    try: return float(value)
+    except (TypeError,ValueError): raise ValidationError(f"{field}必须是数字")
+def require_time(value,field):
+    if not isinstance(value,str) or not value.strip(): raise ValidationError(f"{field}不能为空")
+    text=value.strip()
+    try: parsed=datetime.fromisoformat(text.replace("Z","+00:00"))
+    except ValueError: raise ValidationError(f"{field}必须是ISO 8601时间")
+    if parsed.tzinfo is None: parsed=parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).replace(microsecond=0).isoformat()

@@ -31,8 +31,19 @@ python3 app.py --db ./data.db --port 8320
 - `POST /api/items/{id}/records`
 - `POST /api/items/{id}/transition`，必须提交`expected_version`
 - `GET /api/audit`
+- `GET /api/booms/deployments`，支持`?status=deployed|recovered`过滤
+- `POST /api/booms/deployments`，登记段号、布设船、起止时刻、长度和端点坐标
+- `POST /api/booms/deployments/{id}/recover`，撤收并补登回收长度
+- `GET /api/booms/summary`，未撤收段的完成/待重布统计
 
 允许角色：observer, response_commander, operations, viewer。估算油量、海况和未完成任务数影响响应等级；关闭前必须完成回收和岸线监测记录。
+
+## 围油栏布设段台账
+
+- 同一段号只允许一条未撤收布设记录，重复布设返回409并说明占用的事件编号、布设船和开始时刻。
+- 新布设段与上一条未撤收段的端点间距超过5米时，两段均记为`pending_redeploy`（待重布），不计入`complete`（完成）。
+- 撤收必须补登回收长度；损耗（布设长度−回收长度）超过原长两成的段自动报废，报废段号不能再布设。
+- 布设和撤收限operations和response_commander角色，判定逻辑在`src/rules.py`，存储在`src/repository.py`，请求入口在`src/http_api.py`。
 
 ## 测试
 
