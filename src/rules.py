@@ -20,3 +20,22 @@ def validate_transition(current,target):
     if not can_transition(current,target): raise ConflictError(f"不能从{current}转换到{target}")
 def completion_blockers(target,open_records): return ["仍有未关闭事项"] if target in TERMINAL_STATES and open_records>0 else []
 def role_for_transition(target): return set(TRANSITION_ROLES.get(target,[]))
+BOOM_STATUSES=['deployed','recovered','scrapped']; BOOM_DEPLOY_ROLES=set(['response_commander','operations']); BOOM_RECOVER_ROLES=set(['response_commander','operations']); BOOM_VIEW_ROLES=VIEW_ROLES
+MAX_JOINT_GAP_M=5.0; SCRAP_LOSS_RATIO=0.2
+def loss_ratio(length_m,recovered_length_m):
+    if length_m<=0: raise ValidationError("布设长度必须大于0")
+    return max(0.0,(length_m-recovered_length_m)/length_m)
+def recovery_status(length_m,recovered_length_m):
+    return BOOM_STATUSES[2] if loss_ratio(length_m,recovered_length_m)>SCRAP_LOSS_RATIO else BOOM_STATUSES[1]
+def joint_gaps(deployments):
+    ordered=sorted(deployments,key=lambda d:(d["start_m"],d["end_m"],d["segment_no"]))
+    gaps=[]
+    for left,right in zip(ordered,ordered[1:]):
+        gap=right["start_m"]-left["end_m"]
+        if gap>MAX_JOINT_GAP_M: gaps.append({"left_id":left["id"],"right_id":right["id"],"left_segment":left["segment_no"],"right_segment":right["segment_no"],"gap_m":round(gap,3)})
+    return gaps
+def needs_redeploy_ids(deployments):
+    ids=set()
+    for gap in joint_gaps(deployments): ids.add(gap["left_id"]); ids.add(gap["right_id"])
+    return ids
+def boom_disposition(deployment_id,redeploy_ids): return 'needs_redeploy' if deployment_id in redeploy_ids else 'complete'

@@ -30,9 +30,15 @@ python3 app.py --db ./data.db --port 8320
 - `GET /api/items/{id}`
 - `POST /api/items/{id}/records`
 - `POST /api/items/{id}/transition`，必须提交`expected_version`
+- `GET /api/items/{id}/boom`，布设段台账（含完成/待重布判定）
+- `POST /api/items/{id}/boom`，登记段号、布设船、起止时刻、长度和起止位置
+- `GET /api/items/{id}/boom/summary`，完成与待重布汇总及缺口明细
+- `POST /api/items/{id}/boom/{deployment_id}/recover`，撤收并登记回收长度
 - `GET /api/audit`
 
 允许角色：observer, response_commander, operations, viewer。估算油量、海况和未完成任务数影响响应等级；关闭前必须完成回收和岸线监测记录。
+
+围油栏台账规则：同一 段号 只允许一条未撤收记录，重复布设返回409并说明占用的事件与记录；相邻两段端点间距超过5米的拼接判为待重布，不计入完成；撤收时登记回收长度，损耗超过原长两成的段报废且不能再布设。判定在`src/rules.py`，存储在`src/repository.py`，请求入口在`src/http_api.py`。
 
 ## 测试
 

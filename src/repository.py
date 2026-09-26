@@ -65,6 +65,26 @@ class Repository:
                     entry_hash TEXT NOT NULL UNIQUE,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS boom_deployments (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+                    segment_no TEXT NOT NULL,
+                    boat TEXT NOT NULL,
+                    start_time TEXT NOT NULL,
+                    end_time TEXT NOT NULL,
+                    length_m REAL NOT NULL CHECK(length_m > 0),
+                    start_m REAL NOT NULL,
+                    end_m REAL NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'deployed'
+                        CHECK(status IN ('deployed','recovered','scrapped')),
+                    recovered_length_m REAL,
+                    recovered_at TEXT,
+                    created_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS ux_boom_active_segment
+                    ON boom_deployments(segment_no) WHERE status='deployed';
+                CREATE INDEX IF NOT EXISTS ix_boom_item ON boom_deployments(item_id);
             """)
 
     @staticmethod
@@ -156,6 +176,84 @@ class Repository:
                 (item_id,),
             ).fetchone()
         return int(row["n"])
+
+    def create_boom_deployment(self, item_id: int, segment_no: str, boat: str,
+                               start_time: str, end_time: str, length_m: float,
+                               start_m: float, end_m: float, actor: str) -> Dict[str, Any]:
+        now = utc_now()
+        self.get_item(item_id)
+        with self._lock, self.conn:
+            scrapped = self.conn.execute(
+                """SELECT id, item_id FROM boom_deployments
+                   WHERE segment_no=? AND status='scrapped' LIMIT 1""",
+                (segment_no,),
+            ).fetchone()
+            if scrapped is not None:
+                raise ConflictError(
+                    f"段{segment_no}已报废（记录#{scrapped['id']}，事件#{scrapped['item_id']}），不能再布设")
+            try:
+                cur = self.conn.execute(
+                    """INSERT INTO boom_deployments(item_id, segment_no, boat, start_time,
+                       end_time, length_m, start_m, end_m, status, created_by, created_at)
+                       VALUES(?,?,?,?,?,?,?,?,'deployed',?,?)""",
+                    (item_id, segment_no, boat, start_time, end_time, length_m,
+                     start_m, end_m, actor, now),
+                )
+                deployment_id = int(cur.lastrowid)
+            except sqlite3.IntegrityError as exc:
+                occupying = self.conn.execute(
+                    """SELECT * FROM boom_deployments
+                       WHERE segment_no=? AND status='deployed'""",
+                    (segment_no,),
+                ).fetchone()
+                if occupying is None:
+                    raise ConflictError("布设记录唯一性冲突") from exc
+                raise ConflictError(
+                    f"段{segment_no}已有未撤收记录#{occupying['id']}"
+                    f"（事件#{occupying['item_id']}，布设船{occupying['boat']}，"
+                    f"{occupying['start_time']}起布设），请先撤收") from exc
+        return self.get_boom_deployment(deployment_id)
+
+    def get_boom_deployment(self, deployment_id: int) -> Dict[str, Any]:
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT * FROM boom_deployments WHERE id=?", (deployment_id,)
+            ).fetchone()
+        if row is None:
+            raise NotFoundError("布设记录不存在")
+        return dict(row)
+
+    def list_boom_deployments(self, item_id: int,
+                              status: Optional[str] = None) -> List[Dict[str, Any]]:
+        self.get_item(item_id)
+        sql = "SELECT * FROM boom_deployments WHERE item_id=?"
+        params: tuple = (item_id,)
+        if status:
+            sql += " AND status=?"
+            params = (item_id, status)
+        sql += " ORDER BY id"
+        with self._lock:
+            rows = self.conn.execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def recover_boom_deployment(self, deployment_id: int, status: str,
+                                recovered_length_m: float, recovered_at: str,
+                                actor: str) -> Dict[str, Any]:
+        with self._lock, self.conn:
+            cur = self.conn.execute(
+                """UPDATE boom_deployments
+                   SET status=?, recovered_length_m=?, recovered_at=?
+                   WHERE id=? AND status='deployed'""",
+                (status, recovered_length_m, recovered_at, deployment_id),
+            )
+            if cur.rowcount == 0:
+                row = self.conn.execute(
+                    "SELECT status FROM boom_deployments WHERE id=?", (deployment_id,)
+                ).fetchone()
+                if row is None:
+                    raise NotFoundError("布设记录不存在")
+                raise ConflictError("该段已撤收或报废，不能重复撤收")
+        return self.get_boom_deployment(deployment_id)
 
     def append_audit(self, action: str, entity_type: str, entity_id: int,
                      actor: str, detail: dict) -> Dict[str, Any]:

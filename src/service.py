@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Dict, Optional
 
-from .domain import ensure_role, normalize_severity, require_number, require_text
+from .audit import utc_now
+from .domain import (NotFoundError, ValidationError, ensure_role,
+                     normalize_severity, require_number, require_text,
+                     require_timestamp)
 from .repository import Repository
-from .rules import (AUDIT_ROLES, CREATE_ROLES, ENTITY, RECORD_ROLES, TITLE,
-                    VIEW_ROLES, completion_blockers, escalation_required,
-                    priority_score, response_deadline_hours, role_for_transition,
+from .rules import (AUDIT_ROLES, BOOM_DEPLOY_ROLES, BOOM_RECOVER_ROLES,
+                    BOOM_VIEW_ROLES, CREATE_ROLES, ENTITY, RECORD_ROLES, TITLE,
+                    VIEW_ROLES, boom_disposition, completion_blockers,
+                    escalation_required, joint_gaps, loss_ratio,
+                    needs_redeploy_ids, priority_score, recovery_status,
+                    response_deadline_hours, role_for_transition,
                     validate_transition)
 
 
@@ -90,6 +97,92 @@ class Service:
     def audit(self, role: str, item_id: Optional[int] = None) -> list:
         ensure_role(role, AUDIT_ROLES)
         return self.repository.list_audit(item_id)
+
+    def deploy_boom(self, item_id: int, payload: Dict[str, Any], actor: str,
+                    role: str) -> Dict[str, Any]:
+        ensure_role(role, BOOM_DEPLOY_ROLES)
+        actor = require_text(actor, "actor", 100)
+        segment_no = require_text(payload.get("segment_no"), "segment_no", 50)
+        boat = require_text(payload.get("boat"), "boat", 100)
+        start_time = require_timestamp(payload.get("start_time"), "start_time")
+        end_time = require_timestamp(payload.get("end_time"), "end_time")
+        if datetime.fromisoformat(end_time) < datetime.fromisoformat(start_time):
+            raise ValidationError("end_time不能早于start_time")
+        length_m = require_number(payload.get("length_m"), "length_m")
+        if length_m <= 0:
+            raise ValidationError("length_m必须大于0")
+        start_m = require_number(payload.get("start_m"), "start_m")
+        end_m = require_number(payload.get("end_m"), "end_m")
+        if end_m < start_m:
+            raise ValidationError("end_m不能小于start_m")
+        deployment = self.repository.create_boom_deployment(
+            item_id, segment_no, boat, start_time, end_time, length_m,
+            start_m, end_m, actor)
+        self.repository.append_audit("boom_deploy", ENTITY, item_id, actor, {
+            "deployment_id": deployment["id"], "segment_no": segment_no,
+            "boat": boat, "length_m": length_m, "start_m": start_m,
+            "end_m": end_m,
+        })
+        return deployment
+
+    def recover_boom(self, item_id: int, deployment_id: int, payload: Dict[str, Any],
+                     actor: str, role: str) -> Dict[str, Any]:
+        ensure_role(role, BOOM_RECOVER_ROLES)
+        actor = require_text(actor, "actor", 100)
+        deployment = self.repository.get_boom_deployment(deployment_id)
+        if deployment["item_id"] != item_id:
+            raise NotFoundError("布设记录不存在")
+        recovered_length_m = require_number(
+            payload.get("recovered_length_m"), "recovered_length_m")
+        if recovered_length_m > deployment["length_m"]:
+            raise ValidationError("回收长度不能超过布设长度")
+        recovered_at = payload.get("recovered_at")
+        if recovered_at is not None:
+            recovered_at = require_timestamp(recovered_at, "recovered_at")
+        else:
+            recovered_at = utc_now()
+        status = recovery_status(deployment["length_m"], recovered_length_m)
+        updated = self.repository.recover_boom_deployment(
+            deployment_id, status, recovered_length_m, recovered_at, actor)
+        self.repository.append_audit("boom_recover", ENTITY, item_id, actor, {
+            "deployment_id": deployment_id, "segment_no": deployment["segment_no"],
+            "recovered_length_m": recovered_length_m,
+            "loss_ratio": round(loss_ratio(deployment["length_m"], recovered_length_m), 4),
+            "status": status,
+        })
+        return updated
+
+    def list_boom(self, item_id: int, role: str) -> list:
+        ensure_role(role, BOOM_VIEW_ROLES)
+        deployments = self.repository.list_boom_deployments(item_id)
+        active = [d for d in deployments if d["status"] == "deployed"]
+        redeploy_ids = needs_redeploy_ids(active)
+        result = []
+        for deployment in deployments:
+            entry = dict(deployment)
+            if deployment["status"] == "deployed":
+                entry["disposition"] = boom_disposition(deployment["id"], redeploy_ids)
+            else:
+                entry["disposition"] = None
+            result.append(entry)
+        return result
+
+    def boom_summary(self, item_id: int, role: str) -> Dict[str, Any]:
+        ensure_role(role, BOOM_VIEW_ROLES)
+        active = self.repository.list_boom_deployments(item_id, status="deployed")
+        gaps = joint_gaps(active)
+        redeploy_ids = needs_redeploy_ids(active)
+        complete = sorted(d["segment_no"] for d in active if d["id"] not in redeploy_ids)
+        pending = sorted(d["segment_no"] for d in active if d["id"] in redeploy_ids)
+        return {
+            "item_id": item_id,
+            "active_count": len(active),
+            "complete": complete,
+            "complete_count": len(complete),
+            "needs_redeploy": pending,
+            "needs_redeploy_count": len(pending),
+            "gaps": gaps,
+        }
 
     @staticmethod
     def enrich(item: Dict[str, Any]) -> Dict[str, Any]:
